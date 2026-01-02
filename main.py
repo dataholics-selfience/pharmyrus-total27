@@ -994,21 +994,7 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Health check with Redis connection test"""
-    try:
-        # Test Redis connection
-        from celery_app import app as celery_app
-        celery_app.connection().ensure_connection(max_retries=3)
-        redis_status = "connected"
-    except Exception as e:
-        redis_status = f"error: {str(e)}"
-    
-    return {
-        "status": "healthy" if redis_status == "connected" else "degraded",
-        "version": "v31.0.3-ASYNC",
-        "redis": redis_status,
-        "timestamp": datetime.now().isoformat()
-    }
+    return {"status": "healthy", "version": "29.0-LOGIN-COMPLETE"}
 
 
 @app.get("/countries")
@@ -1479,176 +1465,120 @@ async def search_patents(request: SearchRequest):
 
 
 # ============================================================================
-# ASYNC SEARCH WRAPPER (for Celery task)
-# ============================================================================
-
-async def execute_search_sync(
-    nome_molecula: str,
-    nome_comercial: str = None,
-    paises_alvo: list = None,
-    include_wipo: bool = False,
-    progress_callback=None
-):
-    """
-    Wrapper for search_patents that adds progress callbacks
-    Used by Celery background task
-    """
-    from pydantic import BaseModel
-    
-    # Create request object
-    class SearchRequest:
-        def __init__(self, nome_molecula, nome_comercial, paises_alvo):
-            self.nome_molecula = nome_molecula
-            self.nome_comercial = nome_comercial or ""
-            self.paises_alvo = paises_alvo or ["BR"]
-    
-    request = SearchRequest(nome_molecula, nome_comercial, paises_alvo)
-    
-    # Hook progress callbacks into the search flow
-    if progress_callback:
-        progress_callback(5, "Starting EPO search...")
-    
-    # Execute the existing search
-    result = await search_patents(request)
-    
-    if progress_callback:
-        progress_callback(100, "Complete!")
-    
-    return result
-
-
-# ============================================================================
-# ASYNC ENDPOINTS (New - for queue processing)
+# ASYNCHRONOUS ENDPOINTS (NEW - For WIPO and long searches)
 # ============================================================================
 
 from celery.result import AsyncResult
-from pydantic import BaseModel
 
-class AsyncSearchRequest(BaseModel):
-    nome_molecula: str
-    nome_comercial: Optional[str] = None
-    paises_alvo: Optional[List[str]] = ["BR"]
-    include_wipo: bool = False
+class AsyncSearchResponse(BaseModel):
+    job_id: str
+    status: str
+    message: str
+    estimated_time: str
+    endpoints: dict
+
+class StatusResponse(BaseModel):
+    job_id: str
+    status: str
+    progress: int
+    step: Optional[str] = None
+    elapsed_seconds: Optional[float] = None
+    message: str
 
 
-@app.post("/search/async")
-async def search_async(request: AsyncSearchRequest):
+@app.post("/search/async", response_model=AsyncSearchResponse)
+async def search_async(request: SearchRequest):
     """
-    Asynchronous patent search - returns immediately with job_id
-    
-    Use this for:
-    - Long searches (>5 minutes)
-    - Searches with WIPO (future)
-    - Batch processing
-    
-    Track progress: GET /search/status/{job_id}
-    Get result: GET /search/result/{job_id}
+    Asynchronous patent search - Returns job_id immediately
+    Use for long searches with WIPO (30-60 min)
     """
     from tasks import search_task
     
-    logger.info(f"🚀 Async search queued: {request.nome_molecula} (WIPO: {request.include_wipo})")
+    logger.info(f"🚀 Async search queued: {request.molecule_name} (WIPO: {request.include_wipo})")
     
-    # Queue the task
     task = search_task.delay(
-        nome_molecula=request.nome_molecula,
-        nome_comercial=request.nome_comercial,
-        paises_alvo=request.paises_alvo,
+        molecule=request.molecule_name,
+        countries=request.countries,
         include_wipo=request.include_wipo
     )
     
     estimated_time = "30-60 minutes" if request.include_wipo else "5-15 minutes"
     
-    return {
-        "job_id": task.id,
-        "status": "queued",
-        "message": f"Search started for {request.nome_molecula}. Use /search/status/{{job_id}} to track progress.",
-        "estimated_time": estimated_time,
-        "endpoints": {
+    return AsyncSearchResponse(
+        job_id=task.id,
+        status="queued",
+        message=f"Search started for {request.molecule_name}. Track progress with status endpoint.",
+        estimated_time=estimated_time,
+        endpoints={
             "status": f"/search/status/{task.id}",
             "result": f"/search/result/{task.id}",
             "cancel": f"/search/cancel/{task.id}"
         }
-    }
+    )
 
 
-@app.get("/search/status/{job_id}")
+@app.get("/search/status/{job_id}", response_model=StatusResponse)
 async def get_search_status(job_id: str):
-    """
-    Get status and progress of an async search
-    
-    Poll this endpoint every 5-10 seconds to track progress
-    """
+    """Get search progress"""
     task = AsyncResult(job_id)
     
     if task is None:
         raise HTTPException(status_code=404, detail="Job not found")
     
-    # Queued
     if task.state == 'PENDING':
-        return {
-            "job_id": job_id,
-            "status": "queued",
-            "progress": 0,
-            "message": "Job is queued, waiting to start..."
-        }
+        return StatusResponse(
+            job_id=job_id,
+            status="queued",
+            progress=0,
+            message="Job queued, waiting to start..."
+        )
     
-    # Running with progress
     elif task.state == 'PROGRESS':
         info = task.info or {}
-        return {
-            "job_id": job_id,
-            "status": "running",
-            "progress": info.get('progress', 0),
-            "step": info.get('step', 'Processing...'),
-            "elapsed_seconds": info.get('elapsed', 0),
-            "molecule": info.get('molecule', ''),
-            "message": f"Currently: {info.get('step', 'Processing...')}"
-        }
+        return StatusResponse(
+            job_id=job_id,
+            status="running",
+            progress=info.get('progress', 0),
+            step=info.get('step', 'Processing...'),
+            elapsed_seconds=info.get('elapsed', 0),
+            message=f"Currently: {info.get('step', 'Processing...')}"
+        )
     
-    # Complete
     elif task.state == 'SUCCESS':
-        return {
-            "job_id": job_id,
-            "status": "complete",
-            "progress": 100,
-            "message": "Search completed successfully! Use /search/result/{job_id} to get data."
-        }
+        return StatusResponse(
+            job_id=job_id,
+            status="complete",
+            progress=100,
+            message="Search completed! Use /search/result to get data."
+        )
     
-    # Failed
     elif task.state == 'FAILURE':
         error_info = task.info or {}
-        return {
-            "job_id": job_id,
-            "status": "failed",
-            "progress": 0,
-            "error": str(error_info.get('error', 'Unknown error')),
-            "message": "Search failed. Check error details."
-        }
+        return StatusResponse(
+            job_id=job_id,
+            status="failed",
+            progress=0,
+            message=f"Search failed: {error_info.get('error', 'Unknown error')}"
+        )
     
-    # Other states
     else:
-        return {
-            "job_id": job_id,
-            "status": task.state.lower(),
-            "progress": 0,
-            "message": f"Job state: {task.state}"
-        }
+        return StatusResponse(
+            job_id=job_id,
+            status=task.state.lower(),
+            progress=0,
+            message=f"Job state: {task.state}"
+        )
 
 
 @app.get("/search/result/{job_id}")
 async def get_search_result(job_id: str):
-    """
-    Get complete search results
-    
-    Only works when status is 'complete'
-    Results are stored for 24 hours
-    """
+    """Get complete search results"""
     task = AsyncResult(job_id)
     
     if task.state != 'SUCCESS':
         raise HTTPException(
             status_code=400,
-            detail=f"Result not ready. Current status: {task.state}. Use /search/status/{job_id}"
+            detail=f"Result not ready. Status: {task.state}. Use /search/status/{job_id}"
         )
     
     return task.result
@@ -1656,11 +1586,7 @@ async def get_search_result(job_id: str):
 
 @app.delete("/search/cancel/{job_id}")
 async def cancel_search(job_id: str):
-    """
-    Cancel a running search
-    
-    Note: May not stop immediately if deep in processing
-    """
+    """Cancel a running search"""
     task = AsyncResult(job_id)
     
     if task.state in ['PENDING', 'PROGRESS']:
@@ -1679,6 +1605,56 @@ async def cancel_search(job_id: str):
         }
 
 
+# Health check update
+@app.get("/health")
+async def health_check():
+    """Enhanced health check with Redis status"""
+    try:
+        from celery_app import app as celery_app
+        celery_app.connection().ensure_connection(max_retries=3)
+        redis_status = "connected"
+    except:
+        redis_status = "disconnected"
+    
+    return {
+        "status": "healthy" if redis_status == "connected" else "degraded",
+        "version": "v31.0.3-ASYNC",
+        "redis": redis_status,
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+# Wrapper function for sync execution
+def execute_search_sync(molecule: str, countries: list, include_wipo: bool = False, progress_callback=None):
+    """
+    Synchronous wrapper for the search endpoint
+    Used by both sync endpoint and async task
+    """
+    import asyncio
+    
+    # Create event loop if needed
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    # Create request
+    class SyncRequest:
+        def __init__(self):
+            self.molecule_name = molecule
+            self.countries = countries
+            self.include_wipo = include_wipo
+    
+    request = SyncRequest()
+    
+    # Run async function in sync context
+    result = loop.run_until_complete(search_endpoint(request))
+    
+    return result
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+

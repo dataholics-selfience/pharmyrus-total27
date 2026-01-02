@@ -6,7 +6,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all application files
+# Copy ALL application files
 COPY main.py .
 COPY google_patents_crawler.py .
 COPY inpi_crawler.py .
@@ -16,11 +16,13 @@ COPY celery_app.py .
 COPY tasks.py .
 
 # Railway uses PORT env variable
-ENV PORT=8000
+ENV PORT=8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:$PORT/health', timeout=5)" || exit 1
+    CMD curl -f http://localhost:${PORT}/health || exit 1
 
-# Run API + Worker in same container (cost-optimized)
-CMD sh -c "uvicorn main:app --host 0.0.0.0 --port $PORT & celery -A celery_app worker --loglevel=info --concurrency=1"
+# Run FastAPI + Celery Worker in same container
+# Railway sets PORT automatically
+CMD sh -c "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080} & celery -A celery_app worker --loglevel=info --concurrency=1"
+
