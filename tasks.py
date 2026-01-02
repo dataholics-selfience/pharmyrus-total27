@@ -1,5 +1,6 @@
 """
 Celery Background Tasks for Pharmyrus
+Wraps the existing search logic with progress tracking
 """
 
 import time
@@ -11,14 +12,15 @@ logger = logging.getLogger(__name__)
 
 
 @app.task(bind=True, name='pharmyrus.search')
-def search_task(self, molecule: str, countries: list = None, include_wipo: bool = False):
+def search_task(self, nome_molecula: str, nome_comercial: str = None, paises_alvo: list = None, include_wipo: bool = False):
     """
     Background task for patent search
     
     Args:
-        molecule: Molecule name to search
-        countries: List of country codes (default: ['BR'])
-        include_wipo: Whether to include WIPO search
+        nome_molecula: Molecule name
+        nome_comercial: Commercial/brand name (optional)
+        paises_alvo: List of target countries (default: ['BR'])
+        include_wipo: Whether to include WIPO search (Future)
     
     Returns:
         Complete search results as JSON
@@ -33,16 +35,16 @@ def search_task(self, molecule: str, countries: list = None, include_wipo: bool 
                 'progress': 0,
                 'step': 'Initializing search...',
                 'elapsed': 0,
-                'molecule': molecule
+                'molecule': nome_molecula
             }
         )
         
-        logger.info(f"🚀 Starting search for: {molecule}")
+        logger.info(f"🚀 Starting async search for: {nome_molecula}")
         
-        # Import search function (your existing code)
-        from main import execute_search
+        # Import search function from main (existing working code)
+        from main import execute_search_sync
         
-        # Execute search with progress callback
+        # Create progress callback
         def progress_callback(progress: int, step: str):
             """Callback to update task progress"""
             elapsed = time.time() - start_time
@@ -52,22 +54,26 @@ def search_task(self, molecule: str, countries: list = None, include_wipo: bool 
                     'progress': progress,
                     'step': step,
                     'elapsed': round(elapsed, 1),
-                    'molecule': molecule
+                    'molecule': nome_molecula
                 }
             )
-            logger.info(f"📊 {molecule}: {progress}% - {step}")
+            logger.info(f"📊 {nome_molecula}: {progress}% - {step}")
         
-        # Run the search
-        result = execute_search(
-            molecule=molecule,
-            countries=countries or ['BR'],
-            include_wipo=include_wipo,
-            progress_callback=progress_callback
+        # Run the search (wraps existing async function)
+        import asyncio
+        result = asyncio.run(
+            execute_search_sync(
+                nome_molecula=nome_molecula,
+                nome_comercial=nome_comercial,
+                paises_alvo=paises_alvo or ['BR'],
+                include_wipo=include_wipo,
+                progress_callback=progress_callback
+            )
         )
         
         # Final update
         elapsed = time.time() - start_time
-        logger.info(f"✅ Search completed for {molecule} in {elapsed:.1f}s")
+        logger.info(f"✅ Search completed for {nome_molecula} in {elapsed:.1f}s")
         
         self.update_state(
             state='PROGRESS',
@@ -75,7 +81,7 @@ def search_task(self, molecule: str, countries: list = None, include_wipo: bool 
                 'progress': 100,
                 'step': 'Complete!',
                 'elapsed': round(elapsed, 1),
-                'molecule': molecule
+                'molecule': nome_molecula
             }
         )
         
@@ -85,7 +91,7 @@ def search_task(self, molecule: str, countries: list = None, include_wipo: bool 
         error_msg = str(e)
         error_trace = traceback.format_exc()
         
-        logger.error(f"❌ Search failed for {molecule}: {error_msg}")
+        logger.error(f"❌ Search failed for {nome_molecula}: {error_msg}")
         logger.error(error_trace)
         
         # Update state to FAILURE
@@ -94,7 +100,7 @@ def search_task(self, molecule: str, countries: list = None, include_wipo: bool 
             meta={
                 'error': error_msg,
                 'traceback': error_trace,
-                'molecule': molecule,
+                'molecule': nome_molecula,
                 'elapsed': round(time.time() - start_time, 1)
             }
         )

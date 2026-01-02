@@ -1,34 +1,26 @@
-# Dockerfile for Pharmyrus Async
-FROM python:3.11-slim
+FROM mcr.microsoft.com/playwright/python:v1.48.0-jammy
 
-# Set working directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Playwright browsers (for web scraping)
-RUN pip install playwright && playwright install chromium && playwright install-deps
-
-# Copy requirements
+# Install dependencies
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY . .
+# Copy all application files
+COPY main.py .
+COPY google_patents_crawler.py .
+COPY inpi_crawler.py .
+COPY merge_logic.py .
+COPY patent_cliff.py .
+COPY celery_app.py .
+COPY tasks.py .
 
-# Expose port
-EXPOSE 8080
+# Railway uses PORT env variable
+ENV PORT=8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+    CMD python -c "import requests; requests.get('http://localhost:$PORT/health', timeout=5)" || exit 1
 
-# Default command (can be overridden)
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080} & celery -A celery_app worker --loglevel=info --concurrency=1"]
+# Run API + Worker in same container (cost-optimized)
+CMD sh -c "uvicorn main:app --host 0.0.0.0 --port $PORT & celery -A celery_app worker --loglevel=info --concurrency=1"

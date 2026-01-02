@@ -1,9 +1,10 @@
 """
-Celery App Configuration for Pharmyrus Async Processing
+Celery App Configuration for Pharmyrus
 """
 
 import os
 import logging
+
 from celery import Celery
 
 # Get Redis URL from environment
@@ -31,8 +32,8 @@ app.conf.update(
     task_track_started=True,
     task_send_sent_event=True,
     
-    # Timeouts
-    task_time_limit=3600,  # 1 hour hard limit
+    # Timeouts (1 hour for WIPO)
+    task_time_limit=3600,  # 60 minutes hard limit
     task_soft_time_limit=3300,  # 55 minutes soft limit
     
     # Result expiration
@@ -49,4 +50,4 @@ app.conf.update(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-logger.info(f"🚀 Celery configured with broker: {redis_url}")
+logger.info(f"🚀 Celery configured with Redis: {redis_url}")
